@@ -1,8 +1,11 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import db from '../db/database';
+import mongoose from 'mongoose';
+import Product from '../models/Product';
+import RestockQueue from '../models/RestockQueue';
+import ActivityLog from '../models/ActivityLog';
 import { authMiddleware } from '../middleware/auth';
-import { AuthRequest, Product } from '../types';
+import { AuthRequest } from '../types';
 
 const router = Router();
 router.use(authMiddleware);
@@ -11,54 +14,51 @@ const restockSchema = z.object({
   quantity_to_add: z.number().int().positive('Quantity to add must be a positive integer'),
 });
 
-interface RestockItem {
-  id: number;
-  product_id: number;
-  added_at: string;
-  name: string;
-  stock_quantity: number;
-  min_stock_threshold: number;
-  status: string;
-  category_name: string | null;
-  priority: 'High' | 'Medium' | 'Low';
-}
+type Priority = 'High' | 'Medium' | 'Low';
 
-function getPriority(stock: number, threshold: number): 'High' | 'Medium' | 'Low' {
+function getPriority(stock: number, threshold: number): Priority {
   if (stock === 0) return 'High';
   if (stock <= Math.floor(threshold / 2)) return 'Medium';
   return 'Low';
 }
 
 // GET /api/restock
-router.get('/', (_req: AuthRequest, res: Response): void => {
-  const items = db.prepare(`
-    SELECT
-      rq.id,
-      rq.product_id,
-      rq.added_at,
-      p.name,
-      p.stock_quantity,
-      p.min_stock_threshold,
-      p.status,
-      c.name as category_name
-    FROM restock_queue rq
-    JOIN products p ON rq.product_id = p.id
-    LEFT JOIN categories c ON p.category_id = c.id
-    ORDER BY p.stock_quantity ASC
-  `).all() as Omit<RestockItem, 'priority'>[];
+router.get('/', async (_req: AuthRequest, res: Response): Promise<void> => {
+  const queueItems = await RestockQueue.find()
+    .populate({
+      path: 'product_id',
+      populate: { path: 'category_id', select: 'name' },
+    })
+    .sort({ 'product_id.stock_quantity': 1 });
 
-  const itemsWithPriority: RestockItem[] = items.map((item) => ({
-    ...item,
-    priority: getPriority(item.stock_quantity, item.min_stock_threshold),
-  }));
+  const data = queueItems
+    .filter((qi) => qi.product_id) // guard against orphaned refs
+    .map((qi) => {
+      const p = qi.product_id as unknown as Record<string, unknown> & {
+        stock_quantity: number;
+        min_stock_threshold: number;
+      };
+      const cat = p.category_id as Record<string, unknown> | null;
+      return {
+        id: (qi._id as mongoose.Types.ObjectId).toString(),
+        product_id: (p as unknown as mongoose.Document)._id?.toString(),
+        added_at: qi.added_at,
+        name: p.name,
+        stock_quantity: p.stock_quantity,
+        min_stock_threshold: p.min_stock_threshold,
+        status: p.status,
+        category_name: cat ? cat.name : null,
+        priority: getPriority(p.stock_quantity, p.min_stock_threshold),
+      };
+    });
 
-  res.json({ data: itemsWithPriority });
+  res.json({ data });
 });
 
 // PUT /api/restock/:product_id/restock
-router.put('/:product_id/restock', (req: AuthRequest, res: Response): void => {
-  const productId = parseInt(req.params['product_id'] as string, 10);
-  if (isNaN(productId)) {
+router.put('/:product_id/restock', async (req: AuthRequest, res: Response): Promise<void> => {
+  const { product_id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(product_id)) {
     res.status(400).json({ error: 'Invalid product ID' });
     return;
   }
@@ -71,49 +71,40 @@ router.put('/:product_id/restock', (req: AuthRequest, res: Response): void => {
 
   const { quantity_to_add } = parsed.data;
 
-  const product = db.prepare('SELECT * FROM products WHERE id = ?').get(productId) as Product | undefined;
+  const product = await Product.findById(product_id);
   if (!product) {
     res.status(404).json({ error: 'Product not found' });
     return;
   }
 
-  const doRestock = db.transaction(() => {
-    const newStock = product.stock_quantity + quantity_to_add;
-    const newStatus: Product['status'] = newStock > 0 ? 'active' : 'out_of_stock';
+  const newStock = product.stock_quantity + quantity_to_add;
+  const newStatus = newStock > 0 ? 'active' : 'out_of_stock';
 
-    db.prepare(`
-      UPDATE products
-      SET stock_quantity = ?, status = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(newStock, newStatus, productId);
-
-    // Remove from restock queue if stock is now above threshold
-    if (newStock >= product.min_stock_threshold) {
-      db.prepare('DELETE FROM restock_queue WHERE product_id = ?').run(productId);
-    }
-
-    // Log activity
-    db.prepare('INSERT INTO activity_log (message) VALUES (?)').run(
-      `${product.name} restocked: +${quantity_to_add} units (total: ${newStock})`
-    );
-
-    return newStock;
+  await Product.findByIdAndUpdate(product_id, {
+    stock_quantity: newStock,
+    status: newStatus,
+    updated_at: new Date(),
   });
 
-  const newStock = doRestock();
+  if (newStock >= product.min_stock_threshold) {
+    await RestockQueue.deleteOne({ product_id });
+  }
 
-  const updatedProduct = db.prepare(`
-    SELECT p.*, c.name as category_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    WHERE p.id = ?
-  `).get(productId) as Product & { category_name: string };
+  await ActivityLog.create({
+    message: `${product.name} restocked: +${quantity_to_add} units (total: ${newStock})`,
+  });
 
-  const inQueue = db.prepare('SELECT id FROM restock_queue WHERE product_id = ?').get(productId);
+  const updatedProduct = await Product.findById(product_id).populate('category_id', 'name');
+  const obj = updatedProduct!.toJSON() as Record<string, unknown>;
+  const cat = obj.category_id as Record<string, unknown> | null;
+  obj.category_name = cat ? cat.name : null;
+  obj.category_id = cat ? cat.id : null;
+
+  const inQueue = await RestockQueue.findOne({ product_id });
 
   res.json({
     data: {
-      product: updatedProduct,
+      product: obj,
       quantity_added: quantity_to_add,
       new_stock: newStock,
       removed_from_queue: !inQueue,

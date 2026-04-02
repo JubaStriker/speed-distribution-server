@@ -1,8 +1,10 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import db from '../db/database';
+import mongoose from 'mongoose';
+import Category from '../models/Category';
+import Product from '../models/Product';
 import { authMiddleware } from '../middleware/auth';
-import { AuthRequest, Category } from '../types';
+import { AuthRequest } from '../types';
 
 const router = Router();
 router.use(authMiddleware);
@@ -12,13 +14,13 @@ const createCategorySchema = z.object({
 });
 
 // GET /api/categories
-router.get('/', (_req: AuthRequest, res: Response): void => {
-  const categories = db.prepare('SELECT * FROM categories ORDER BY name ASC').all() as Category[];
+router.get('/', async (_req: AuthRequest, res: Response): Promise<void> => {
+  const categories = await Category.find().sort({ name: 1 });
   res.json({ data: categories });
 });
 
 // POST /api/categories
-router.post('/', (req: AuthRequest, res: Response): void => {
+router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const parsed = createCategorySchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ errors: parsed.error.issues.map((e) => e.message) });
@@ -27,40 +29,37 @@ router.post('/', (req: AuthRequest, res: Response): void => {
 
   const { name } = parsed.data;
 
-  const existing = db.prepare('SELECT id FROM categories WHERE name = ?').get(name);
+  const existing = await Category.findOne({ name });
   if (existing) {
     res.status(409).json({ error: 'Category with this name already exists' });
     return;
   }
 
-  const result = db.prepare('INSERT INTO categories (name) VALUES (?)').run(name);
-  const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid) as Category;
-
+  const category = await Category.create({ name });
   res.status(201).json({ data: category });
 });
 
 // DELETE /api/categories/:id
-router.delete('/:id', (req: AuthRequest, res: Response): void => {
-  const id = parseInt(req.params['id'] as string, 10);
-  if (isNaN(id)) {
+router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid category ID' });
     return;
   }
 
-  const category = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  const category = await Category.findById(id);
   if (!category) {
     res.status(404).json({ error: 'Category not found' });
     return;
   }
 
-  // Check if any products reference this category
-  const productCount = db.prepare('SELECT COUNT(*) as count FROM products WHERE category_id = ?').get(id) as { count: number };
-  if (productCount.count > 0) {
+  const productCount = await Product.countDocuments({ category_id: id });
+  if (productCount > 0) {
     res.status(409).json({ error: 'Cannot delete category with associated products' });
     return;
   }
 
-  db.prepare('DELETE FROM categories WHERE id = ?').run(id);
+  await Category.findByIdAndDelete(id);
   res.json({ message: 'Category deleted successfully' });
 });
 

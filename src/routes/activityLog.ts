@@ -1,19 +1,14 @@
 import { Router, Response } from 'express';
-import db from '../db/database';
+import ActivityLog from '../models/ActivityLog';
 import { authMiddleware } from '../middleware/auth';
-import { AuthRequest, ActivityLog } from '../types';
+import { AuthRequest } from '../types';
 
 const router = Router();
 router.use(authMiddleware);
 
 // GET /api/activity-log
-router.get('/', (_req: AuthRequest, res: Response): void => {
-  const logs = db.prepare(`
-    SELECT * FROM activity_log
-    ORDER BY created_at DESC
-    LIMIT 10
-  `).all() as ActivityLog[];
-
+router.get('/', async (_req: AuthRequest, res: Response): Promise<void> => {
+  const logs = await ActivityLog.find().sort({ created_at: -1 }).limit(10);
   res.json({ data: logs });
 });
 

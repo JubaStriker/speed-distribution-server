@@ -1,8 +1,12 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import db from '../db/database';
+import mongoose from 'mongoose';
+import Order from '../models/Order';
+import Product from '../models/Product';
+import RestockQueue from '../models/RestockQueue';
+import ActivityLog from '../models/ActivityLog';
 import { authMiddleware } from '../middleware/auth';
-import { AuthRequest, Order, OrderItem, Product } from '../types';
+import { AuthRequest } from '../types';
 
 const router = Router();
 router.use(authMiddleware);
@@ -12,7 +16,7 @@ const createOrderSchema = z.object({
   items: z
     .array(
       z.object({
-        product_id: z.number().int().positive('Product ID must be a positive integer'),
+        product_id: z.string().min(1, 'Product ID is required'),
         quantity: z.number().int().positive('Quantity must be a positive integer'),
       })
     )
@@ -23,38 +27,33 @@ const updateStatusSchema = z.object({
   status: z.enum(['pending', 'confirmed', 'shipped', 'delivered', 'cancelled']),
 });
 
-function logActivity(message: string): void {
-  db.prepare('INSERT INTO activity_log (message) VALUES (?)').run(message);
+async function logActivity(message: string): Promise<void> {
+  await ActivityLog.create({ message });
 }
 
 // GET /api/orders
-router.get('/', (req: AuthRequest, res: Response): void => {
+router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const { status, date, page = '1', limit = '20' } = req.query;
 
   const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 20));
-  const offset = (pageNum - 1) * limitNum;
+  const skip = (pageNum - 1) * limitNum;
 
-  let query = 'SELECT * FROM orders WHERE 1=1';
-  const params: (string | number)[] = [];
-
-  if (status) {
-    query += ' AND status = ?';
-    params.push(status as string);
-  }
-
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const filter: Record<string, any> = {};
+  if (status) filter.status = status;
   if (date === 'today') {
-    query += " AND DATE(created_at) = DATE('now')";
+    const start = new Date();
+    start.setHours(0, 0, 0, 0);
+    const end = new Date();
+    end.setHours(23, 59, 59, 999);
+    filter.created_at = { $gte: start, $lte: end };
   }
 
-  const countQuery = query.replace('SELECT *', 'SELECT COUNT(*) as total');
-  const countResult = db.prepare(countQuery).get(params) as { total: number };
-  const total = countResult.total;
-
-  query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
-  const allParams = [...params, limitNum, offset];
-
-  const orders = db.prepare(query).all(allParams) as Order[];
+  const [total, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter).sort({ created_at: -1 }).skip(skip).limit(limitNum),
+  ]);
 
   res.json({
     data: orders,
@@ -68,7 +67,7 @@ router.get('/', (req: AuthRequest, res: Response): void => {
 });
 
 // POST /api/orders
-router.post('/', (req: AuthRequest, res: Response): void => {
+router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const parsed = createOrderSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ errors: parsed.error.issues.map((e) => e.message) });
@@ -77,125 +76,117 @@ router.post('/', (req: AuthRequest, res: Response): void => {
 
   const { customer_name, items } = parsed.data;
 
-  // 1. Check for duplicate product_ids in request
+  // Check for duplicate product_ids in request
   const productIds = items.map((i) => i.product_id);
-  const uniqueIds = new Set(productIds);
-  if (uniqueIds.size !== productIds.length) {
+  if (new Set(productIds).size !== productIds.length) {
     res.status(409).json({ error: 'This product is already added to the order.' });
     return;
   }
 
-  // 2. Validate each product
+  // Validate ObjectIds
   for (const item of items) {
-    const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) as Product | undefined;
+    if (!mongoose.Types.ObjectId.isValid(item.product_id)) {
+      res.status(400).json({ error: `Invalid product ID: ${item.product_id}` });
+      return;
+    }
+  }
 
+  // Validate each product
+  const productDocs = [];
+  for (const item of items) {
+    const product = await Product.findById(item.product_id);
     if (!product) {
       res.status(404).json({ error: `Product with ID ${item.product_id} not found` });
       return;
     }
-
     if (product.status !== 'active') {
       res.status(409).json({ error: 'This product is currently unavailable.' });
       return;
     }
-
     if (product.stock_quantity < item.quantity) {
       res.status(400).json({ error: `Only ${product.stock_quantity} items available in stock` });
       return;
     }
+    productDocs.push({ product, quantity: item.quantity });
   }
 
-  // 3. All valid — create order in a transaction
-  const createOrder = db.transaction(() => {
-    // Calculate total price
-    let total_price = 0;
-    const itemDetails: Array<{ product: Product; quantity: number }> = [];
-
-    for (const item of items) {
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) as Product;
-      total_price += product.price * item.quantity;
-      itemDetails.push({ product, quantity: item.quantity });
-    }
-
-    // Create order
-    const orderResult = db.prepare(`
-      INSERT INTO orders (customer_name, status, total_price)
-      VALUES (?, 'pending', ?)
-    `).run(customer_name, total_price);
-
-    const orderId = orderResult.lastInsertRowid as number;
-
-    // Create order items and deduct stock
-    for (const { product, quantity } of itemDetails) {
-      db.prepare(`
-        INSERT INTO order_items (order_id, product_id, quantity, unit_price)
-        VALUES (?, ?, ?, ?)
-      `).run(orderId, product.id, quantity, product.price);
-
-      const newStock = product.stock_quantity - quantity;
-
-      // Determine new status
-      const newStatus: Product['status'] = newStock === 0 ? 'out_of_stock' : 'active';
-
-      db.prepare(`
-        UPDATE products
-        SET stock_quantity = ?, status = ?, updated_at = datetime('now')
-        WHERE id = ?
-      `).run(newStock, newStatus, product.id);
-
-      // Add to restock queue if below threshold
-      if (newStock < product.min_stock_threshold) {
-        db.prepare('INSERT OR IGNORE INTO restock_queue (product_id) VALUES (?)').run(product.id);
-      }
-    }
-
-    // Log activity
-    logActivity(`Order #${orderId} created for ${customer_name}`);
-
-    return orderId;
+  // Calculate total price and build order items
+  let total_price = 0;
+  const orderItems = productDocs.map(({ product, quantity }) => {
+    total_price += product.price * quantity;
+    return { product_id: product._id, quantity, unit_price: product.price };
   });
 
-  const orderId = createOrder();
+  // Create order
+  const order = await Order.create({ customer_name, total_price, items: orderItems });
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId) as Order;
-  const orderItems = db.prepare(`
-    SELECT oi.*, p.name as product_name
-    FROM order_items oi
-    LEFT JOIN products p ON oi.product_id = p.id
-    WHERE oi.order_id = ?
-  `).all(orderId) as (OrderItem & { product_name: string })[];
+  // Deduct stock and manage restock queue
+  for (const { product, quantity } of productDocs) {
+    const newStock = product.stock_quantity - quantity;
+    const newStatus = newStock === 0 ? 'out_of_stock' : 'active';
 
-  res.status(201).json({ data: { ...order, items: orderItems } });
+    await Product.findByIdAndUpdate(product._id, {
+      stock_quantity: newStock,
+      status: newStatus,
+      updated_at: new Date(),
+    });
+
+    if (newStock < product.min_stock_threshold) {
+      await RestockQueue.findOneAndUpdate(
+        { product_id: product._id },
+        { product_id: product._id },
+        { upsert: true }
+      );
+    }
+  }
+
+  await logActivity(`Order #${order._id} created for ${customer_name}`);
+
+  // Return order with product names
+  const populatedOrder = await Order.findById(order._id).populate('items.product_id', 'name');
+  const obj = populatedOrder!.toJSON() as Record<string, unknown>;
+  const orderItems2 = (obj.items as Record<string, unknown>[]).map((item) => {
+    const prod = item.product_id as Record<string, unknown> | null;
+    return { ...item, product_name: prod ? prod.name : null, product_id: prod ? prod.id : item.product_id };
+  });
+  obj.items = orderItems2;
+
+  res.status(201).json({ data: obj });
 });
 
 // GET /api/orders/:id
-router.get('/:id', (req: AuthRequest, res: Response): void => {
-  const id = parseInt(req.params['id'] as string, 10);
-  if (isNaN(id)) {
+router.get('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid order ID' });
     return;
   }
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as Order | undefined;
+  const order = await Order.findById(id).populate('items.product_id', 'name status');
   if (!order) {
     res.status(404).json({ error: 'Order not found' });
     return;
   }
 
-  const items = db.prepare(`
-    SELECT oi.*, p.name as product_name, p.status as product_status
-    FROM order_items oi
-    LEFT JOIN products p ON oi.product_id = p.id
-    WHERE oi.order_id = ?
-  `).all(id) as (OrderItem & { product_name: string; product_status: string })[];
+  const obj = order.toJSON() as Record<string, unknown>;
+  const orderItems = (obj.items as Record<string, unknown>[]).map((item) => {
+    const prod = item.product_id as Record<string, unknown> | null;
+    return {
+      ...item,
+      product_name: prod ? prod.name : null,
+      product_status: prod ? prod.status : null,
+      product_id: prod ? prod.id : item.product_id,
+    };
+  });
+  obj.items = orderItems;
 
-  res.json({ data: { ...order, items } });
+  res.json({ data: obj });
 });
 
 // PUT /api/orders/:id/status
-router.put('/:id/status', (req: AuthRequest, res: Response): void => {
-  const id = parseInt(req.params['id'] as string, 10);
-  if (isNaN(id)) {
+router.put('/:id/status', async (req: AuthRequest, res: Response): Promise<void> => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid order ID' });
     return;
   }
@@ -208,7 +199,7 @@ router.put('/:id/status', (req: AuthRequest, res: Response): void => {
 
   const { status } = parsed.data;
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as Order | undefined;
+  const order = await Order.findById(id);
   if (!order) {
     res.status(404).json({ error: 'Order not found' });
     return;
@@ -218,67 +209,52 @@ router.put('/:id/status', (req: AuthRequest, res: Response): void => {
     res.status(409).json({ error: 'Cannot update status of a cancelled order' });
     return;
   }
-
   if (order.status === status) {
     res.status(409).json({ error: `Order is already in '${status}' status` });
     return;
   }
 
-  const updateStatus = db.transaction(() => {
-    db.prepare(`
-      UPDATE orders
-      SET status = ?, updated_at = datetime('now')
-      WHERE id = ?
-    `).run(status, id);
+  await Order.findByIdAndUpdate(id, { status, updated_at: new Date() });
 
-    if (status === 'cancelled') {
-      // Restore stock for all order items
-      const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(id) as OrderItem[];
-
-      for (const item of orderItems) {
-        const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) as Product;
-        const restoredStock = product.stock_quantity + item.quantity;
-
-        db.prepare(`
-          UPDATE products
-          SET stock_quantity = ?, status = 'active', updated_at = datetime('now')
-          WHERE id = ?
-        `).run(restoredStock, product.id);
-
-        // Re-check if product should still be in restock queue
-        if (restoredStock >= product.min_stock_threshold) {
-          db.prepare('DELETE FROM restock_queue WHERE product_id = ?').run(product.id);
-        }
+  if (status === 'cancelled') {
+    for (const item of order.items) {
+      const product = await Product.findById(item.product_id);
+      if (!product) continue;
+      const restoredStock = product.stock_quantity + item.quantity;
+      await Product.findByIdAndUpdate(product._id, {
+        stock_quantity: restoredStock,
+        status: 'active',
+        updated_at: new Date(),
+      });
+      if (restoredStock >= product.min_stock_threshold) {
+        await RestockQueue.deleteOne({ product_id: product._id });
       }
-
-      logActivity(`Order #${id} cancelled`);
-    } else {
-      logActivity(`Order #${id} marked as ${status}`);
     }
+    await logActivity(`Order #${id} cancelled`);
+  } else {
+    await logActivity(`Order #${id} marked as ${status}`);
+  }
+
+  const updatedOrder = await Order.findById(id).populate('items.product_id', 'name');
+  const obj = updatedOrder!.toJSON() as Record<string, unknown>;
+  const orderItems = (obj.items as Record<string, unknown>[]).map((item) => {
+    const prod = item.product_id as Record<string, unknown> | null;
+    return { ...item, product_name: prod ? prod.name : null, product_id: prod ? prod.id : item.product_id };
   });
+  obj.items = orderItems;
 
-  updateStatus();
-
-  const updatedOrder = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as Order;
-  const items = db.prepare(`
-    SELECT oi.*, p.name as product_name
-    FROM order_items oi
-    LEFT JOIN products p ON oi.product_id = p.id
-    WHERE oi.order_id = ?
-  `).all(id) as (OrderItem & { product_name: string })[];
-
-  res.json({ data: { ...updatedOrder, items } });
+  res.json({ data: obj });
 });
 
 // DELETE /api/orders/:id — cancel order
-router.delete('/:id', (req: AuthRequest, res: Response): void => {
-  const id = parseInt(req.params['id'] as string, 10);
-  if (isNaN(id)) {
+router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid order ID' });
     return;
   }
 
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id) as Order | undefined;
+  const order = await Order.findById(id);
   if (!order) {
     res.status(404).json({ error: 'Order not found' });
     return;
@@ -289,34 +265,23 @@ router.delete('/:id', (req: AuthRequest, res: Response): void => {
     return;
   }
 
-  const cancelOrder = db.transaction(() => {
-    db.prepare(`
-      UPDATE orders
-      SET status = 'cancelled', updated_at = datetime('now')
-      WHERE id = ?
-    `).run(id);
+  await Order.findByIdAndUpdate(id, { status: 'cancelled', updated_at: new Date() });
 
-    const orderItems = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(id) as OrderItem[];
-
-    for (const item of orderItems) {
-      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id) as Product;
-      const restoredStock = product.stock_quantity + item.quantity;
-
-      db.prepare(`
-        UPDATE products
-        SET stock_quantity = ?, status = 'active', updated_at = datetime('now')
-        WHERE id = ?
-      `).run(restoredStock, product.id);
-
-      if (restoredStock >= product.min_stock_threshold) {
-        db.prepare('DELETE FROM restock_queue WHERE product_id = ?').run(product.id);
-      }
+  for (const item of order.items) {
+    const product = await Product.findById(item.product_id);
+    if (!product) continue;
+    const restoredStock = product.stock_quantity + item.quantity;
+    await Product.findByIdAndUpdate(product._id, {
+      stock_quantity: restoredStock,
+      status: 'active',
+      updated_at: new Date(),
+    });
+    if (restoredStock >= product.min_stock_threshold) {
+      await RestockQueue.deleteOne({ product_id: product._id });
     }
+  }
 
-    logActivity(`Order #${id} cancelled`);
-  });
-
-  cancelOrder();
+  await logActivity(`Order #${id} cancelled`);
 
   res.json({ message: 'Order cancelled successfully' });
 });
