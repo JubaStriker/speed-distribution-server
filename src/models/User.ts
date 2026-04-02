@@ -7,10 +7,12 @@ export interface IUser extends Document {
   lastName: string;
   role: 'admin' | 'manager';
   created_at: Date;
+  userId: string; 
 }
 
 const userSchema = new Schema<IUser>(
   {
+    userId: { type: String, required: true, unique: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password_hash: { type: String, required: true },
     firstName: { type: String, required: true, trim: true },

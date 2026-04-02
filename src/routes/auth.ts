@@ -5,6 +5,8 @@ import { z } from 'zod';
 import User from '../models/User';
 import { authMiddleware } from '../middleware/auth';
 import { AuthRequest } from '../types';
+import { getId } from '../utils/idGenerator';
+import { decryptData } from '../utils/hash';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-speed-distribution-2024';
@@ -38,12 +40,16 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const password_hash = await bcrypt.hash(password, 10);
+  const decryptedPassword = decryptData(password);
+
+  const password_hash = await bcrypt.hash(decryptedPassword, 10);
+
+  const userId = getId('USR')
 
   const newUser = {
-    email, password_hash, firstName, lastName, role
+    userId, email, password_hash, firstName, lastName, role
   }
-  
+
   const user = await User.create(newUser);
 
   const token = jwt.sign(
