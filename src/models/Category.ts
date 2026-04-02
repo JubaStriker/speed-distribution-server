@@ -3,11 +3,13 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface ICategory extends Document {
   name: string;
   created_at: Date;
+  category_id: mongoose.Types.ObjectId | null;
 }
 
 const categorySchema = new Schema<ICategory>(
   {
     name: { type: String, required: true, unique: true, trim: true },
+    category_id: { type: String, ref: 'Category', required: true, unique: true, },
     created_at: { type: Date, default: Date.now },
   },
   { versionKey: false }

@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Category from '../models/Category';
 import Product from '../models/Product';
 import { ServiceError } from './errors';
+import { getId } from '../utils/idGenerator';
 
 export async function getCategories() {
   return Category.find().sort({ name: 1 });
@@ -10,8 +11,9 @@ export async function getCategories() {
 export async function createCategory(name: string) {
   const existing = await Category.findOne({ name });
   if (existing) throw new ServiceError(409, 'Category with this name already exists');
+  const categoryId = getId("CTG");
 
-  return Category.create({ name });
+  return Category.create({ name, category_id: categoryId });
 }
 
 export async function deleteCategory(id: string) {
