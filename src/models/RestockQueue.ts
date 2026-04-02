@@ -14,7 +14,8 @@ const restockQueueSchema = new Schema<IRestockQueue>(
 );
 
 restockQueueSchema.set('toJSON', {
-  transform: (_doc, ret) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transform: (_doc: unknown, ret: any) => {
     ret.id = ret._id.toString();
     ret.product_id = ret.product_id?.toString();
     delete ret._id;

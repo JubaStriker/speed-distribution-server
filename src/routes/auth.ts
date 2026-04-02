@@ -46,7 +46,8 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
     { expiresIn: '7d' }
   );
 
-  const { password_hash: _, ...userJSON } = user.toJSON() as Record<string, unknown>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { password_hash: _, ...userJSON } = user.toJSON() as any;
   res.status(201).json({ data: { user: userJSON, token } });
 });
 
@@ -78,7 +79,8 @@ router.post('/login', async (req: Request, res: Response): Promise<void> => {
     { expiresIn: '7d' }
   );
 
-  const { password_hash: _, ...userJSON } = user.toJSON() as Record<string, unknown>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { password_hash: _, ...userJSON } = user.toJSON() as any;
   res.json({ data: { user: userJSON, token } });
 });
 
@@ -90,7 +92,8 @@ router.get('/me', authMiddleware, async (req: AuthRequest, res: Response): Promi
     return;
   }
 
-  const { password_hash: _, ...userJSON } = user.toJSON() as Record<string, unknown>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { password_hash: _, ...userJSON } = user.toJSON() as any;
   res.json({ data: userJSON });
 });
 

@@ -42,16 +42,16 @@ const orderSchema = new Schema<IOrder>(
 );
 
 orderSchema.set('toJSON', {
-  transform: (_doc, ret) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transform: (_doc: unknown, ret: any) => {
     ret.id = ret._id.toString();
     delete ret._id;
     if (Array.isArray(ret.items)) {
-      ret.items = ret.items.map((item: IOrderItem & { _id?: Types.ObjectId }) => {
-        const i = { ...item };
-        (i as Record<string, unknown>)['id'] = i._id?.toString();
-        (i as Record<string, unknown>)['product_id'] = i.product_id?.toString();
-        delete i._id;
-        return i;
+      ret.items = ret.items.map((item: any) => {
+        item.id = item._id?.toString();
+        item.product_id = item.product_id?.toString();
+        delete item._id;
+        return item;
       });
     }
   },

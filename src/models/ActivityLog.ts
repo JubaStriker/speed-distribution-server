@@ -14,7 +14,8 @@ const activityLogSchema = new Schema<IActivityLog>(
 );
 
 activityLogSchema.set('toJSON', {
-  transform: (_doc, ret) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transform: (_doc: unknown, ret: any) => {
     ret.id = ret._id.toString();
     delete ret._id;
   },

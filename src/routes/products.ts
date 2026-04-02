@@ -28,6 +28,20 @@ const updateProductSchema = z.object({
   status: z.enum(['active', 'out_of_stock']).optional(),
 });
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toProductJSON(p: any) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = p.toJSON() as any;
+  const cat = obj.category_id as Record<string, unknown> | null;
+  if (cat && typeof cat === 'object' && 'name' in cat) {
+    obj.category_name = cat.name;
+    obj.category_id = cat.id ?? cat._id?.toString();
+  } else {
+    obj.category_name = null;
+  }
+  return obj;
+}
+
 // GET /api/products
 router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const { q, category_id, status, page = '1', limit = '20' } = req.query;
@@ -40,7 +54,7 @@ router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const filter: Record<string, any> = {};
   if (q) filter.name = { $regex: q as string, $options: 'i' };
   if (category_id && mongoose.Types.ObjectId.isValid(category_id as string)) {
-    filter.category_id = category_id;
+    filter.category_id = new mongoose.Types.ObjectId(category_id as string);
   }
   if (status) filter.status = status;
 
@@ -53,16 +67,8 @@ router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
       .limit(limitNum),
   ]);
 
-  const data = products.map((p) => {
-    const obj = p.toJSON() as Record<string, unknown>;
-    const cat = obj.category_id as Record<string, unknown> | null;
-    obj.category_name = cat ? cat.name : null;
-    obj.category_id = cat ? cat.id : null;
-    return obj;
-  });
-
   res.json({
-    data,
+    data: products.map(toProductJSON),
     pagination: {
       page: pageNum,
       limit: limitNum,
@@ -108,17 +114,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   }
 
   const populated = await product.populate('category_id', 'name');
-  const obj = populated.toJSON() as Record<string, unknown>;
-  const cat = obj.category_id as Record<string, unknown> | null;
-  obj.category_name = cat ? cat.name : null;
-  obj.category_id = cat ? cat.id : null;
-
-  res.status(201).json({ data: obj });
+  res.status(201).json({ data: toProductJSON(populated) });
 });
 
 // PUT /api/products/:id
 router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params['id']);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid product ID' });
     return;
@@ -173,26 +174,21 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
 
   if (newStock < newThreshold) {
     await RestockQueue.findOneAndUpdate(
-      { product_id: id },
-      { product_id: id },
+      { product_id: new mongoose.Types.ObjectId(id) },
+      { product_id: new mongoose.Types.ObjectId(id) },
       { upsert: true }
     );
   } else {
-    await RestockQueue.deleteOne({ product_id: id });
+    await RestockQueue.deleteOne({ product_id: new mongoose.Types.ObjectId(id) });
   }
 
   const product = await Product.findById(id).populate('category_id', 'name');
-  const obj = product!.toJSON() as Record<string, unknown>;
-  const cat = obj.category_id as Record<string, unknown> | null;
-  obj.category_name = cat ? cat.name : null;
-  obj.category_id = cat ? cat.id : null;
-
-  res.json({ data: obj });
+  res.json({ data: toProductJSON(product) });
 });
 
 // DELETE /api/products/:id
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params['id']);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid product ID' });
     return;
@@ -204,13 +200,13 @@ router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => 
     return;
   }
 
-  const orderCount = await Order.countDocuments({ 'items.product_id': id });
+  const orderCount = await Order.countDocuments({ 'items.product_id': new mongoose.Types.ObjectId(id) });
   if (orderCount > 0) {
     res.status(409).json({ error: 'Cannot delete product that has associated orders' });
     return;
   }
 
-  await RestockQueue.deleteOne({ product_id: id });
+  await RestockQueue.deleteOne({ product_id: new mongoose.Types.ObjectId(id) });
   await Product.findByIdAndDelete(id);
 
   res.json({ message: 'Product deleted successfully' });

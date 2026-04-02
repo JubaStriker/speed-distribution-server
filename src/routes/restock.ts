@@ -24,40 +24,40 @@ function getPriority(stock: number, threshold: number): Priority {
 
 // GET /api/restock
 router.get('/', async (_req: AuthRequest, res: Response): Promise<void> => {
-  const queueItems = await RestockQueue.find()
-    .populate({
-      path: 'product_id',
-      populate: { path: 'category_id', select: 'name' },
-    })
-    .sort({ 'product_id.stock_quantity': 1 });
+  const queueItems = await RestockQueue.find().populate({
+    path: 'product_id',
+    populate: { path: 'category_id', select: 'name' },
+  });
 
-  const data = queueItems
-    .filter((qi) => qi.product_id) // guard against orphaned refs
-    .map((qi) => {
-      const p = qi.product_id as unknown as Record<string, unknown> & {
-        stock_quantity: number;
-        min_stock_threshold: number;
-      };
-      const cat = p.category_id as Record<string, unknown> | null;
-      return {
-        id: (qi._id as mongoose.Types.ObjectId).toString(),
-        product_id: (p as unknown as mongoose.Document)._id?.toString(),
-        added_at: qi.added_at,
-        name: p.name,
-        stock_quantity: p.stock_quantity,
-        min_stock_threshold: p.min_stock_threshold,
-        status: p.status,
-        category_name: cat ? cat.name : null,
-        priority: getPriority(p.stock_quantity, p.min_stock_threshold),
-      };
-    });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data = queueItems.map((qi) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const p = qi.product_id as any;
+    if (!p) return null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cat = p.category_id as any;
+    return {
+      id: qi._id.toString(),
+      product_id: p._id?.toString(),
+      added_at: qi.added_at,
+      name: p.name,
+      stock_quantity: p.stock_quantity,
+      min_stock_threshold: p.min_stock_threshold,
+      status: p.status,
+      category_name: cat ? cat.name : null,
+      priority: getPriority(p.stock_quantity as number, p.min_stock_threshold as number),
+    };
+  }).filter(Boolean);
+
+  // Sort by stock_quantity ascending
+  data.sort((a, b) => (a!.stock_quantity as number) - (b!.stock_quantity as number));
 
   res.json({ data });
 });
 
 // PUT /api/restock/:product_id/restock
 router.put('/:product_id/restock', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { product_id } = req.params;
+  const product_id = String(req.params['product_id']);
   if (!mongoose.Types.ObjectId.isValid(product_id)) {
     res.status(400).json({ error: 'Invalid product ID' });
     return;
@@ -87,7 +87,7 @@ router.put('/:product_id/restock', async (req: AuthRequest, res: Response): Prom
   });
 
   if (newStock >= product.min_stock_threshold) {
-    await RestockQueue.deleteOne({ product_id });
+    await RestockQueue.deleteOne({ product_id: new mongoose.Types.ObjectId(product_id) });
   }
 
   await ActivityLog.create({
@@ -95,12 +95,18 @@ router.put('/:product_id/restock', async (req: AuthRequest, res: Response): Prom
   });
 
   const updatedProduct = await Product.findById(product_id).populate('category_id', 'name');
-  const obj = updatedProduct!.toJSON() as Record<string, unknown>;
-  const cat = obj.category_id as Record<string, unknown> | null;
-  obj.category_name = cat ? cat.name : null;
-  obj.category_id = cat ? cat.id : null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = updatedProduct!.toJSON() as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cat = obj.category_id as any;
+  if (cat && typeof cat === 'object' && 'name' in cat) {
+    obj.category_name = cat.name;
+    obj.category_id = cat.id ?? cat._id?.toString();
+  } else {
+    obj.category_name = null;
+  }
 
-  const inQueue = await RestockQueue.findOne({ product_id });
+  const inQueue = await RestockQueue.findOne({ product_id: new mongoose.Types.ObjectId(product_id) });
 
   res.json({
     data: {

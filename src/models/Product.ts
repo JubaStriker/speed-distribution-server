@@ -26,7 +26,8 @@ const productSchema = new Schema<IProduct>(
 );
 
 productSchema.set('toJSON', {
-  transform: (_doc, ret) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transform: (_doc: unknown, ret: any) => {
     ret.id = ret._id.toString();
     ret.category_id = ret.category_id?.toString();
     delete ret._id;

@@ -41,7 +41,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
 // DELETE /api/categories/:id
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params['id']);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid category ID' });
     return;
@@ -53,7 +53,7 @@ router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => 
     return;
   }
 
-  const productCount = await Product.countDocuments({ category_id: id });
+  const productCount = await Product.countDocuments({ category_id: new mongoose.Types.ObjectId(id) });
   if (productCount > 0) {
     res.status(409).json({ error: 'Cannot delete category with associated products' });
     return;

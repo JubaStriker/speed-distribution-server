@@ -31,6 +31,26 @@ async function logActivity(message: string): Promise<void> {
   await ActivityLog.create({ message });
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function flattenOrderItems(order: any) {
+  const obj = order.toJSON ? order.toJSON() : order;
+  if (Array.isArray(obj.items)) {
+    obj.items = obj.items.map((item: Record<string, unknown>) => {
+      const prod = item.product_id as Record<string, unknown> | null;
+      if (prod && typeof prod === 'object' && 'name' in prod) {
+        return {
+          ...item,
+          product_name: prod.name,
+          product_status: (prod as Record<string, unknown>).status ?? undefined,
+          product_id: prod.id ?? prod._id?.toString(),
+        };
+      }
+      return item;
+    });
+  }
+  return obj;
+}
+
 // GET /api/orders
 router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const { status, date, page = '1', limit = '20' } = req.query;
@@ -76,14 +96,12 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
   const { customer_name, items } = parsed.data;
 
-  // Check for duplicate product_ids in request
   const productIds = items.map((i) => i.product_id);
   if (new Set(productIds).size !== productIds.length) {
     res.status(409).json({ error: 'This product is already added to the order.' });
     return;
   }
 
-  // Validate ObjectIds
   for (const item of items) {
     if (!mongoose.Types.ObjectId.isValid(item.product_id)) {
       res.status(400).json({ error: `Invalid product ID: ${item.product_id}` });
@@ -91,7 +109,6 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     }
   }
 
-  // Validate each product
   const productDocs = [];
   for (const item of items) {
     const product = await Product.findById(item.product_id);
@@ -110,17 +127,14 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
     productDocs.push({ product, quantity: item.quantity });
   }
 
-  // Calculate total price and build order items
   let total_price = 0;
   const orderItems = productDocs.map(({ product, quantity }) => {
     total_price += product.price * quantity;
     return { product_id: product._id, quantity, unit_price: product.price };
   });
 
-  // Create order
   const order = await Order.create({ customer_name, total_price, items: orderItems });
 
-  // Deduct stock and manage restock queue
   for (const { product, quantity } of productDocs) {
     const newStock = product.stock_quantity - quantity;
     const newStatus = newStock === 0 ? 'out_of_stock' : 'active';
@@ -142,21 +156,13 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
 
   await logActivity(`Order #${order._id} created for ${customer_name}`);
 
-  // Return order with product names
-  const populatedOrder = await Order.findById(order._id).populate('items.product_id', 'name');
-  const obj = populatedOrder!.toJSON() as Record<string, unknown>;
-  const orderItems2 = (obj.items as Record<string, unknown>[]).map((item) => {
-    const prod = item.product_id as Record<string, unknown> | null;
-    return { ...item, product_name: prod ? prod.name : null, product_id: prod ? prod.id : item.product_id };
-  });
-  obj.items = orderItems2;
-
-  res.status(201).json({ data: obj });
+  const populated = await Order.findById(order._id).populate('items.product_id', 'name');
+  res.status(201).json({ data: flattenOrderItems(populated) });
 });
 
 // GET /api/orders/:id
 router.get('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params['id']);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid order ID' });
     return;
@@ -168,24 +174,12 @@ router.get('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
     return;
   }
 
-  const obj = order.toJSON() as Record<string, unknown>;
-  const orderItems = (obj.items as Record<string, unknown>[]).map((item) => {
-    const prod = item.product_id as Record<string, unknown> | null;
-    return {
-      ...item,
-      product_name: prod ? prod.name : null,
-      product_status: prod ? prod.status : null,
-      product_id: prod ? prod.id : item.product_id,
-    };
-  });
-  obj.items = orderItems;
-
-  res.json({ data: obj });
+  res.json({ data: flattenOrderItems(order) });
 });
 
 // PUT /api/orders/:id/status
 router.put('/:id/status', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params['id']);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid order ID' });
     return;
@@ -236,19 +230,12 @@ router.put('/:id/status', async (req: AuthRequest, res: Response): Promise<void>
   }
 
   const updatedOrder = await Order.findById(id).populate('items.product_id', 'name');
-  const obj = updatedOrder!.toJSON() as Record<string, unknown>;
-  const orderItems = (obj.items as Record<string, unknown>[]).map((item) => {
-    const prod = item.product_id as Record<string, unknown> | null;
-    return { ...item, product_name: prod ? prod.name : null, product_id: prod ? prod.id : item.product_id };
-  });
-  obj.items = orderItems;
-
-  res.json({ data: obj });
+  res.json({ data: flattenOrderItems(updatedOrder) });
 });
 
 // DELETE /api/orders/:id — cancel order
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
-  const { id } = req.params;
+  const id = String(req.params['id']);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid order ID' });
     return;
