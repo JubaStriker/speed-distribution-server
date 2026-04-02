@@ -12,7 +12,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-speed-distribution-
 const signupSchema = z.object({
   email: z.string().email('Invalid email address'),
   password: z.string().min(6, 'Password must be at least 6 characters'),
-  name: z.string().min(1, 'Name is required'),
+  firstName: z.string().min(1, 'First name is required'),
+  lastName: z.string().min(1, 'Last name is required'),
   role: z.enum(['admin', 'manager']).optional().default('manager'),
 });
 
@@ -29,7 +30,7 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const { email, password, name, role } = parsed.data;
+  const { email, password, firstName, lastName, role } = parsed.data;
 
   const existing = await User.findOne({ email });
   if (existing) {
@@ -38,7 +39,12 @@ router.post('/signup', async (req: Request, res: Response): Promise<void> => {
   }
 
   const password_hash = await bcrypt.hash(password, 10);
-  const user = await User.create({ email, password_hash, name, role });
+
+  const newUser = {
+    email, password_hash, firstName, lastName, role
+  }
+  
+  const user = await User.create(newUser);
 
   const token = jwt.sign(
     { userId: user._id.toString(), email: user.email, role: user.role },
