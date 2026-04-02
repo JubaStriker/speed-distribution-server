@@ -1,15 +1,19 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import db from '../db/database';
+import mongoose from 'mongoose';
+import Product from '../models/Product';
+import Category from '../models/Category';
+import RestockQueue from '../models/RestockQueue';
+import Order from '../models/Order';
 import { authMiddleware } from '../middleware/auth';
-import { AuthRequest, Product } from '../types';
+import { AuthRequest } from '../types';
 
 const router = Router();
 router.use(authMiddleware);
 
 const createProductSchema = z.object({
   name: z.string().min(1, 'Product name is required'),
-  category_id: z.number().int().positive('Category ID must be a positive integer'),
+  category_id: z.string().min(1, 'Category ID is required'),
   price: z.number().positive('Price must be positive'),
   stock_quantity: z.number().int().min(0, 'Stock quantity cannot be negative'),
   min_stock_threshold: z.number().int().min(0, 'Min stock threshold cannot be negative'),
@@ -17,56 +21,54 @@ const createProductSchema = z.object({
 
 const updateProductSchema = z.object({
   name: z.string().min(1).optional(),
-  category_id: z.number().int().positive().optional(),
+  category_id: z.string().optional(),
   price: z.number().positive().optional(),
   stock_quantity: z.number().int().min(0).optional(),
   min_stock_threshold: z.number().int().min(0).optional(),
   status: z.enum(['active', 'out_of_stock']).optional(),
 });
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toProductJSON(p: any) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const obj = p.toJSON() as any;
+  const cat = obj.category_id as Record<string, unknown> | null;
+  if (cat && typeof cat === 'object' && 'name' in cat) {
+    obj.category_name = cat.name;
+    obj.category_id = cat.id ?? cat._id?.toString();
+  } else {
+    obj.category_name = null;
+  }
+  return obj;
+}
+
 // GET /api/products
-router.get('/', (req: AuthRequest, res: Response): void => {
+router.get('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const { q, category_id, status, page = '1', limit = '20' } = req.query;
 
   const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
   const limitNum = Math.min(100, Math.max(1, parseInt(limit as string, 10) || 20));
-  const offset = (pageNum - 1) * limitNum;
+  const skip = (pageNum - 1) * limitNum;
 
-  let query = `
-    SELECT p.*, c.name as category_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    WHERE 1=1
-  `;
-  const params: (string | number)[] = [];
-
-  if (q) {
-    query += ' AND p.name LIKE ?';
-    params.push(`%${q as string}%`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const filter: Record<string, any> = {};
+  if (q) filter.name = { $regex: q as string, $options: 'i' };
+  if (category_id && mongoose.Types.ObjectId.isValid(category_id as string)) {
+    filter.category_id = new mongoose.Types.ObjectId(category_id as string);
   }
-  if (category_id) {
-    query += ' AND p.category_id = ?';
-    params.push(parseInt(category_id as string, 10));
-  }
-  if (status) {
-    query += ' AND p.status = ?';
-    params.push(status as string);
-  }
+  if (status) filter.status = status;
 
-  const countQuery = query.replace(
-    'SELECT p.*, c.name as category_name',
-    'SELECT COUNT(*) as total'
-  );
-  const countResult = db.prepare(countQuery).get(params) as { total: number };
-  const total = countResult.total;
-
-  query += ' ORDER BY p.created_at DESC LIMIT ? OFFSET ?';
-  const allParams = [...params, limitNum, offset];
-
-  const products = db.prepare(query).all(allParams) as (Product & { category_name: string })[];
+  const [total, products] = await Promise.all([
+    Product.countDocuments(filter),
+    Product.find(filter)
+      .populate('category_id', 'name')
+      .sort({ created_at: -1 })
+      .skip(skip)
+      .limit(limitNum),
+  ]);
 
   res.json({
-    data: products,
+    data: products.map(toProductJSON),
     pagination: {
       page: pageNum,
       limit: limitNum,
@@ -77,7 +79,7 @@ router.get('/', (req: AuthRequest, res: Response): void => {
 });
 
 // POST /api/products
-router.post('/', (req: AuthRequest, res: Response): void => {
+router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   const parsed = createProductSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ errors: parsed.error.issues.map((e) => e.message) });
@@ -86,38 +88,39 @@ router.post('/', (req: AuthRequest, res: Response): void => {
 
   const { name, category_id, price, stock_quantity, min_stock_threshold } = parsed.data;
 
-  const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(category_id);
+  if (!mongoose.Types.ObjectId.isValid(category_id)) {
+    res.status(400).json({ error: 'Invalid category ID' });
+    return;
+  }
+
+  const category = await Category.findById(category_id);
   if (!category) {
     res.status(404).json({ error: 'Category not found' });
     return;
   }
 
-  const status: Product['status'] = stock_quantity === 0 ? 'out_of_stock' : 'active';
+  const status = stock_quantity === 0 ? 'out_of_stock' : 'active';
 
-  const result = db.prepare(`
-    INSERT INTO products (name, category_id, price, stock_quantity, min_stock_threshold, status)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(name, category_id, price, stock_quantity, min_stock_threshold, status);
+  const product = await Product.create({
+    name, category_id, price, stock_quantity, min_stock_threshold, status,
+  });
 
-  const product = db.prepare(`
-    SELECT p.*, c.name as category_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    WHERE p.id = ?
-  `).get(result.lastInsertRowid) as Product & { category_name: string };
-
-  // Add to restock queue if below threshold
   if (stock_quantity < min_stock_threshold) {
-    db.prepare('INSERT OR IGNORE INTO restock_queue (product_id) VALUES (?)').run(product.id);
+    await RestockQueue.findOneAndUpdate(
+      { product_id: product._id },
+      { product_id: product._id },
+      { upsert: true }
+    );
   }
 
-  res.status(201).json({ data: product });
+  const populated = await product.populate('category_id', 'name');
+  res.status(201).json({ data: toProductJSON(populated) });
 });
 
 // PUT /api/products/:id
-router.put('/:id', (req: AuthRequest, res: Response): void => {
-  const id = parseInt(req.params['id'] as string, 10);
-  if (isNaN(id)) {
+router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = String(req.params['id']);
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid product ID' });
     return;
   }
@@ -128,14 +131,18 @@ router.put('/:id', (req: AuthRequest, res: Response): void => {
     return;
   }
 
-  const existing = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Product | undefined;
+  const existing = await Product.findById(id);
   if (!existing) {
     res.status(404).json({ error: 'Product not found' });
     return;
   }
 
   if (parsed.data.category_id) {
-    const category = db.prepare('SELECT id FROM categories WHERE id = ?').get(parsed.data.category_id);
+    if (!mongoose.Types.ObjectId.isValid(parsed.data.category_id)) {
+      res.status(400).json({ error: 'Invalid category ID' });
+      return;
+    }
+    const category = await Category.findById(parsed.data.category_id);
     if (!category) {
       res.status(404).json({ error: 'Category not found' });
       return;
@@ -146,7 +153,6 @@ router.put('/:id', (req: AuthRequest, res: Response): void => {
   const newStock = updates.stock_quantity !== undefined ? updates.stock_quantity : existing.stock_quantity;
   const newThreshold = updates.min_stock_threshold !== undefined ? updates.min_stock_threshold : existing.min_stock_threshold;
 
-  // Auto-set status based on stock if not explicitly provided
   let newStatus = updates.status !== undefined ? updates.status : existing.status;
   if (updates.stock_quantity !== undefined) {
     if (newStock === 0) {
@@ -156,61 +162,52 @@ router.put('/:id', (req: AuthRequest, res: Response): void => {
     }
   }
 
-  db.prepare(`
-    UPDATE products
-    SET name = ?, category_id = ?, price = ?, stock_quantity = ?,
-        min_stock_threshold = ?, status = ?, updated_at = datetime('now')
-    WHERE id = ?
-  `).run(
-    updates.name ?? existing.name,
-    updates.category_id ?? existing.category_id,
-    updates.price ?? existing.price,
-    newStock,
-    newThreshold,
-    newStatus,
-    id
-  );
+  await Product.findByIdAndUpdate(id, {
+    name: updates.name ?? existing.name,
+    category_id: updates.category_id ?? existing.category_id,
+    price: updates.price ?? existing.price,
+    stock_quantity: newStock,
+    min_stock_threshold: newThreshold,
+    status: newStatus,
+    updated_at: new Date(),
+  });
 
-  // Manage restock queue based on new stock level
   if (newStock < newThreshold) {
-    db.prepare('INSERT OR IGNORE INTO restock_queue (product_id) VALUES (?)').run(id);
+    await RestockQueue.findOneAndUpdate(
+      { product_id: new mongoose.Types.ObjectId(id) },
+      { product_id: new mongoose.Types.ObjectId(id) },
+      { upsert: true }
+    );
   } else {
-    db.prepare('DELETE FROM restock_queue WHERE product_id = ?').run(id);
+    await RestockQueue.deleteOne({ product_id: new mongoose.Types.ObjectId(id) });
   }
 
-  const product = db.prepare(`
-    SELECT p.*, c.name as category_name
-    FROM products p
-    LEFT JOIN categories c ON p.category_id = c.id
-    WHERE p.id = ?
-  `).get(id) as Product & { category_name: string };
-
-  res.json({ data: product });
+  const product = await Product.findById(id).populate('category_id', 'name');
+  res.json({ data: toProductJSON(product) });
 });
 
 // DELETE /api/products/:id
-router.delete('/:id', (req: AuthRequest, res: Response): void => {
-  const id = parseInt(req.params['id'] as string, 10);
-  if (isNaN(id)) {
+router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
+  const id = String(req.params['id']);
+  if (!mongoose.Types.ObjectId.isValid(id)) {
     res.status(400).json({ error: 'Invalid product ID' });
     return;
   }
 
-  const product = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
+  const product = await Product.findById(id);
   if (!product) {
     res.status(404).json({ error: 'Product not found' });
     return;
   }
 
-  // Check if product is in any orders
-  const orderCount = db.prepare('SELECT COUNT(*) as count FROM order_items WHERE product_id = ?').get(id) as { count: number };
-  if (orderCount.count > 0) {
+  const orderCount = await Order.countDocuments({ 'items.product_id': new mongoose.Types.ObjectId(id) });
+  if (orderCount > 0) {
     res.status(409).json({ error: 'Cannot delete product that has associated orders' });
     return;
   }
 
-  db.prepare('DELETE FROM restock_queue WHERE product_id = ?').run(id);
-  db.prepare('DELETE FROM products WHERE id = ?').run(id);
+  await RestockQueue.deleteOne({ product_id: new mongoose.Types.ObjectId(id) });
+  await Product.findByIdAndDelete(id);
 
   res.json({ message: 'Product deleted successfully' });
 });

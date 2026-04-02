@@ -1,56 +1,82 @@
 import { Router, Response } from 'express';
-import db from '../db/database';
+import Order from '../models/Order';
+import Product from '../models/Product';
+import RestockQueue from '../models/RestockQueue';
 import { authMiddleware } from '../middleware/auth';
-import { AuthRequest, Product } from '../types';
+import { AuthRequest } from '../types';
 
 const router = Router();
 router.use(authMiddleware);
 
 // GET /api/dashboard
-router.get('/', (_req: AuthRequest, res: Response): void => {
-  // Total orders today
-  const totalOrdersToday = (db.prepare(`
-    SELECT COUNT(*) as count FROM orders
-    WHERE DATE(created_at) = DATE('now')
-  `).get() as { count: number }).count;
+router.get('/', async (_req: AuthRequest, res: Response): Promise<void> => {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date();
+  todayEnd.setHours(23, 59, 59, 999);
 
-  // Pending orders
-  const pendingOrders = (db.prepare(`
-    SELECT COUNT(*) as count FROM orders WHERE status = 'pending'
-  `).get() as { count: number }).count;
+  const [
+    totalOrdersToday,
+    pendingOrders,
+    completedOrders,
+    lowStockCount,
+    revenueTodayResult,
+    lowStockProducts,
+    ordersByStatusRows,
+    revenueLast7DaysRows,
+  ] = await Promise.all([
+    Order.countDocuments({ created_at: { $gte: todayStart, $lte: todayEnd } }),
+    Order.countDocuments({ status: 'pending' }),
+    Order.countDocuments({ status: 'delivered' }),
+    RestockQueue.countDocuments(),
+    Order.aggregate([
+      {
+        $match: {
+          created_at: { $gte: todayStart, $lte: todayEnd },
+          status: { $ne: 'cancelled' },
+        },
+      },
+      { $group: { _id: null, revenue: { $sum: '$total_price' } } },
+    ]),
+    RestockQueue.find()
+      .populate('product_id', 'name stock_quantity status min_stock_threshold')
+      .then((items) =>
+        items
+          .filter((qi) => qi.product_id)
+          .map((qi) => {
+            const p = qi.product_id as unknown as Record<string, unknown>;
+            return {
+              name: p.name,
+              stock_quantity: p.stock_quantity,
+              status: p.status,
+              min_stock_threshold: p.min_stock_threshold,
+            };
+          })
+          .sort((a, b) => (a.stock_quantity as number) - (b.stock_quantity as number))
+      ),
+    Order.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
+    Order.aggregate([
+      {
+        $match: {
+          created_at: {
+            $gte: new Date(Date.now() - 6 * 86400000),
+          },
+          status: { $ne: 'cancelled' },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: '%Y-%m-%d', date: '$created_at' },
+          },
+          revenue: { $sum: '$total_price' },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]),
+  ]);
 
-  // Completed orders (delivered)
-  const completedOrders = (db.prepare(`
-    SELECT COUNT(*) as count FROM orders WHERE status = 'delivered'
-  `).get() as { count: number }).count;
-
-  // Low stock count (products in restock queue)
-  const lowStockCount = (db.prepare(`
-    SELECT COUNT(*) as count FROM restock_queue
-  `).get() as { count: number }).count;
-
-  // Revenue today (from non-cancelled orders)
-  const revenueToday = (db.prepare(`
-    SELECT COALESCE(SUM(total_price), 0) as revenue
-    FROM orders
-    WHERE DATE(created_at) = DATE('now')
-      AND status != 'cancelled'
-  `).get() as { revenue: number }).revenue;
-
-  // Low stock products
-  const lowStockProducts = db.prepare(`
-    SELECT p.name, p.stock_quantity, p.status, p.min_stock_threshold
-    FROM products p
-    JOIN restock_queue rq ON p.id = rq.product_id
-    ORDER BY p.stock_quantity ASC
-  `).all() as Pick<Product, 'name' | 'stock_quantity' | 'status' | 'min_stock_threshold'>[];
-
-  // Orders by status
-  const ordersByStatusRows = db.prepare(`
-    SELECT status, COUNT(*) as count
-    FROM orders
-    GROUP BY status
-  `).all() as { status: string; count: number }[];
+  const revenueToday = revenueTodayResult[0]?.revenue ?? 0;
 
   const ordersByStatus: Record<string, number> = {
     pending: 0,
@@ -60,29 +86,19 @@ router.get('/', (_req: AuthRequest, res: Response): void => {
     cancelled: 0,
   };
   for (const row of ordersByStatusRows) {
-    ordersByStatus[row.status] = row.count;
+    ordersByStatus[row._id as string] = row.count as number;
   }
 
-  // Revenue last 7 days
-  const revenueLast7Days = db.prepare(`
-    SELECT
-      DATE(created_at) as date,
-      COALESCE(SUM(total_price), 0) as revenue
-    FROM orders
-    WHERE created_at >= DATE('now', '-6 days')
-      AND status != 'cancelled'
-    GROUP BY DATE(created_at)
-    ORDER BY date ASC
-  `).all() as { date: string; revenue: number }[];
-
   // Fill in missing days with 0 revenue
+  const revenueMap = new Map<string, number>(
+    revenueLast7DaysRows.map((r) => [r._id as string, r.revenue as number])
+  );
   const last7Days: { date: string; revenue: number }[] = [];
   for (let i = 6; i >= 0; i--) {
-    const date = new Date();
-    date.setDate(date.getDate() - i);
-    const dateStr = date.toISOString().split('T')[0];
-    const existing = revenueLast7Days.find((r) => r.date === dateStr);
-    last7Days.push({ date: dateStr, revenue: existing ? existing.revenue : 0 });
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const dateStr = d.toISOString().split('T')[0];
+    last7Days.push({ date: dateStr, revenue: revenueMap.get(dateStr) ?? 0 });
   }
 
   res.json({
