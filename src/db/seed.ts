@@ -24,7 +24,7 @@ const seed = async () => {
 
   // ── Users ────────────────────────────────────────────────────────────────
   const passwordHash = await bcrypt.hash('demo123', 10);
-  await User.create({ email: 'demo@example.com', password_hash: passwordHash, name: 'Demo User', role: 'admin' });
+  await User.create({ userId: 'seed-admin-001', email: 'demo@example.com', password_hash: passwordHash, firstName: 'Demo', lastName: 'User', role: 'admin' });
   console.log('Users seeded.');
 
   // ── Categories ───────────────────────────────────────────────────────────

@@ -47,7 +47,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   }
 
   try {
-    const product = await productService.createProduct(parsed.data);
+    const product = await productService.createProduct(parsed.data, req.user!.email);
     res.status(201).json({ data: product });
   } catch (err) {
     if (err instanceof ServiceError) {
@@ -67,7 +67,7 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   }
 
   try {
-    const product = await productService.updateProduct(String(req.params['id']), parsed.data);
+    const product = await productService.updateProduct(String(req.params['id']), parsed.data, req.user!.email);
     res.json({ data: product });
   } catch (err) {
     if (err instanceof ServiceError) {
@@ -81,7 +81,7 @@ router.put('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
 // DELETE /api/products/:id
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    await productService.deleteProduct(String(req.params['id']));
+    await productService.deleteProduct(String(req.params['id']), req.user!.email);
     res.json({ message: 'Product deleted successfully' });
   } catch (err) {
     if (err instanceof ServiceError) {

@@ -4,6 +4,7 @@ import Category from '../models/Category';
 import RestockQueue from '../models/RestockQueue';
 import Order from '../models/Order';
 import { ServiceError } from './errors';
+import { createLog } from './activityLog.service';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function toProductJSON(p: any) {
@@ -58,7 +59,7 @@ export async function createProduct(data: {
   price: number;
   stock_quantity: number;
   min_stock_threshold: number;
-}) {
+}, userEmail: string) {
   const { name, category_id, price, stock_quantity, min_stock_threshold } = data;
 
   if (!mongoose.Types.ObjectId.isValid(category_id)) {
@@ -83,6 +84,7 @@ export async function createProduct(data: {
   }
 
   const populated = await product.populate('category_id', 'name');
+  await createLog(`Product "${name}" added`, userEmail);
   return toProductJSON(populated);
 }
 
@@ -95,7 +97,8 @@ export async function updateProduct(
     stock_quantity?: number;
     min_stock_threshold?: number;
     status?: 'active' | 'out_of_stock';
-  }
+  },
+  userEmail: string
 ) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new ServiceError(400, 'Invalid product ID');
@@ -148,10 +151,11 @@ export async function updateProduct(
   }
 
   const product = await Product.findById(id).populate('category_id', 'name');
+  await createLog(`Product "${existing.name}" updated`, userEmail);
   return toProductJSON(product);
 }
 
-export async function deleteProduct(id: string) {
+export async function deleteProduct(id: string, userEmail: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new ServiceError(400, 'Invalid product ID');
   }
@@ -166,4 +170,5 @@ export async function deleteProduct(id: string) {
 
   await RestockQueue.deleteOne({ product_id: new mongoose.Types.ObjectId(id) });
   await Product.findByIdAndDelete(id);
+  await createLog(`Product "${product.name}" deleted`, userEmail);
 }
