@@ -45,7 +45,7 @@ router.post('/', async (req: AuthRequest, res: Response): Promise<void> => {
   }
 
   try {
-    const order = await orderService.createOrder(parsed.data);
+    const order = await orderService.createOrder(parsed.data, req.user!.email);
     res.status(201).json({ data: order });
   } catch (err) {
     if (err instanceof ServiceError) {
@@ -79,7 +79,7 @@ router.put('/:id/status', async (req: AuthRequest, res: Response): Promise<void>
   }
 
   try {
-    const order = await orderService.updateOrderStatus(String(req.params['id']), parsed.data.status);
+    const order = await orderService.updateOrderStatus(String(req.params['id']), parsed.data.status, req.user!.email);
     res.json({ data: order });
   } catch (err) {
     if (err instanceof ServiceError) {
@@ -93,7 +93,7 @@ router.put('/:id/status', async (req: AuthRequest, res: Response): Promise<void>
 // DELETE /api/orders/:id — cancel order
 router.delete('/:id', async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    await orderService.cancelOrder(String(req.params['id']));
+    await orderService.cancelOrder(String(req.params['id']), req.user!.email);
     res.json({ message: 'Order cancelled successfully' });
   } catch (err) {
     if (err instanceof ServiceError) {

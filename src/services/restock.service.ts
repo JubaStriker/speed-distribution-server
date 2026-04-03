@@ -36,12 +36,29 @@ export async function getRestockQueue() {
       status: p.status,
       category_name: cat ? cat.name : null,
       priority: getPriority(p.stock_quantity as number, p.min_stock_threshold as number),
+      restock_status: qi.restock_status,
     };
   }).filter(Boolean);
 
   data.sort((a, b) => (a!.stock_quantity as number) - (b!.stock_quantity as number));
 
   return data;
+}
+
+export async function updateRestockStatus(id: string, restock_status: 'pending' | 'completed') {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new ServiceError(400, 'Invalid restock queue ID');
+  }
+
+  const item = await RestockQueue.findByIdAndUpdate(
+    id,
+    { restock_status },
+    { new: true }
+  );
+
+  if (!item) throw new ServiceError(404, 'Restock queue item not found');
+
+  return { id: item._id.toString(), restock_status: item.restock_status };
 }
 
 export async function restockProduct(product_id: string, quantity_to_add: number) {

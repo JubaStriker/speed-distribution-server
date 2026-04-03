@@ -8,6 +8,7 @@ export interface IOrderItem {
 }
 
 export interface IOrder extends Document {
+  order_id: string;
   customer_name: string;
   status: 'pending' | 'confirmed' | 'shipped' | 'delivered' | 'cancelled';
   total_price: number;
@@ -27,6 +28,7 @@ const orderItemSchema = new Schema<IOrderItem>(
 
 const orderSchema = new Schema<IOrder>(
   {
+    order_id: { type: String, required: true, unique: true },
     customer_name: { type: String, required: true, trim: true },
     status: {
       type: String,
@@ -49,7 +51,13 @@ orderSchema.set('toJSON', {
     if (Array.isArray(ret.items)) {
       ret.items = ret.items.map((item: any) => {
         item.id = item._id?.toString();
-        item.product_id = item.product_id?.toString();
+        const prod = item.product_id;
+        if (prod && typeof prod === 'object' && 'name' in prod) {
+          item.product_name = prod.name;
+          item.product_id = prod.id ?? prod._id?.toString();
+        } else {
+          item.product_id = prod?.toString();
+        }
         delete item._id;
         return item;
       });

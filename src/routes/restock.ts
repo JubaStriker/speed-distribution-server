@@ -12,10 +12,37 @@ const restockSchema = z.object({
   quantity_to_add: z.number().int().positive('Quantity to add must be a positive integer'),
 });
 
+const restockStatusSchema = z.object({
+  restock_status: z.enum(['pending', 'completed']),
+});
+
 // GET /api/restock
 router.get('/', async (_req: AuthRequest, res: Response): Promise<void> => {
   const data = await restockService.getRestockQueue();
   res.json({ data });
+});
+
+// PATCH /api/restock/:id/status
+router.patch('/:id/status', async (req: AuthRequest, res: Response): Promise<void> => {
+  const parsed = restockStatusSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ errors: parsed.error.issues.map((e) => e.message) });
+    return;
+  }
+
+  try {
+    const result = await restockService.updateRestockStatus(
+      String(req.params['id']),
+      parsed.data.restock_status
+    );
+    res.json({ data: result });
+  } catch (err) {
+    if (err instanceof ServiceError) {
+      res.status(err.statusCode).json({ error: err.message });
+    } else {
+      throw err;
+    }
+  }
 });
 
 // PUT /api/restock/:product_id/restock

@@ -40,7 +40,8 @@ export async function login(email: string, password: string) {
   const user = await User.findOne({ email });
   if (!user) throw new ServiceError(401, 'Invalid email or password');
 
-  const valid = await bcrypt.compare(password, user.password_hash);
+  const decryptedPassword = decryptData(password);
+  const valid = await bcrypt.compare(decryptedPassword, user.password_hash);
   if (!valid) throw new ServiceError(401, 'Invalid email or password');
 
   const token = jwt.sign(

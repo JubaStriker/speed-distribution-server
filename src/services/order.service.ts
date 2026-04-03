@@ -2,8 +2,9 @@ import mongoose from 'mongoose';
 import Order from '../models/Order';
 import Product from '../models/Product';
 import RestockQueue from '../models/RestockQueue';
-import ActivityLog from '../models/ActivityLog';
 import { ServiceError } from './errors';
+import { createLog } from './activityLog.service';
+import { getId } from '../utils/idGenerator';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function flattenOrderItems(order: any) {
@@ -23,10 +24,6 @@ export function flattenOrderItems(order: any) {
     });
   }
   return obj;
-}
-
-async function logActivity(message: string): Promise<void> {
-  await ActivityLog.create({ message });
 }
 
 export async function getOrders(query: {
@@ -54,11 +51,11 @@ export async function getOrders(query: {
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
-    Order.find(filter).sort({ created_at: -1 }).skip(skip).limit(limitNum),
+    Order.find(filter).sort({ created_at: -1 }).skip(skip).limit(limitNum).populate('items.product_id', 'name'),
   ]);
 
   return {
-    data: orders,
+    data: orders.map(flattenOrderItems),
     pagination: {
       page: pageNum,
       limit: limitNum,
@@ -71,7 +68,7 @@ export async function getOrders(query: {
 export async function createOrder(data: {
   customer_name: string;
   items: { product_id: string; quantity: number }[];
-}) {
+}, userEmail: string) {
   const { customer_name, items } = data;
 
   const productIds = items.map((i) => i.product_id);
@@ -102,7 +99,7 @@ export async function createOrder(data: {
     return { product_id: product._id, quantity, unit_price: product.price };
   });
 
-  const order = await Order.create({ customer_name, total_price, items: orderItems });
+  const order = await Order.create({ order_id: getId('ORD'), customer_name, total_price, items: orderItems });
 
   for (const { product, quantity } of productDocs) {
     const newStock = product.stock_quantity - quantity;
@@ -123,7 +120,7 @@ export async function createOrder(data: {
     }
   }
 
-  await logActivity(`Order #${order._id} created for ${customer_name}`);
+  await createLog(`Order #${order._id} created for ${customer_name}`, userEmail);
 
   const populated = await Order.findById(order._id).populate('items.product_id', 'name');
   return flattenOrderItems(populated);
@@ -140,7 +137,7 @@ export async function getOrder(id: string) {
   return flattenOrderItems(order);
 }
 
-export async function updateOrderStatus(id: string, status: string) {
+export async function updateOrderStatus(id: string, status: string, userEmail: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new ServiceError(400, 'Invalid order ID');
   }
@@ -171,16 +168,16 @@ export async function updateOrderStatus(id: string, status: string) {
         await RestockQueue.deleteOne({ product_id: product._id });
       }
     }
-    await logActivity(`Order #${id} cancelled`);
+    await createLog(`Order #${id} cancelled`, userEmail);
   } else {
-    await logActivity(`Order #${id} marked as ${status}`);
+    await createLog(`Order #${id} marked as ${status}`, userEmail);
   }
 
   const updatedOrder = await Order.findById(id).populate('items.product_id', 'name');
   return flattenOrderItems(updatedOrder);
 }
 
-export async function cancelOrder(id: string) {
+export async function cancelOrder(id: string, userEmail: string) {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw new ServiceError(400, 'Invalid order ID');
   }
@@ -208,5 +205,5 @@ export async function cancelOrder(id: string) {
     }
   }
 
-  await logActivity(`Order #${id} cancelled`);
+  await createLog(`Order #${id} cancelled`, userEmail);
 }
