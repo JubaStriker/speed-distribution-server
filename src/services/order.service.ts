@@ -4,6 +4,7 @@ import Product from '../models/Product';
 import RestockQueue from '../models/RestockQueue';
 import ActivityLog from '../models/ActivityLog';
 import { ServiceError } from './errors';
+import { getId } from '../utils/idGenerator';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function flattenOrderItems(order: any) {
@@ -54,11 +55,11 @@ export async function getOrders(query: {
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
-    Order.find(filter).sort({ created_at: -1 }).skip(skip).limit(limitNum),
+    Order.find(filter).sort({ created_at: -1 }).skip(skip).limit(limitNum).populate('items.product_id', 'name'),
   ]);
 
   return {
-    data: orders,
+    data: orders.map(flattenOrderItems),
     pagination: {
       page: pageNum,
       limit: limitNum,
@@ -102,7 +103,7 @@ export async function createOrder(data: {
     return { product_id: product._id, quantity, unit_price: product.price };
   });
 
-  const order = await Order.create({ customer_name, total_price, items: orderItems });
+  const order = await Order.create({ order_id: getId('ORD'), customer_name, total_price, items: orderItems });
 
   for (const { product, quantity } of productDocs) {
     const newStock = product.stock_quantity - quantity;
