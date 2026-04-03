@@ -10,6 +10,7 @@ import productsRoutes from './routes/products';
 import ordersRoutes from './routes/orders';
 import restockRoutes from './routes/restock';
 import dashboardRoutes from './routes/dashboard';
+import analyticsRoutes from './routes/analytics';
 import activityLogRoutes from './routes/activityLog';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -37,6 +38,7 @@ app.use('/api/products', productsRoutes);
 app.use('/api/orders', ordersRoutes);
 app.use('/api/restock', restockRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/analytics', analyticsRoutes);
 app.use('/api/activity-log', activityLogRoutes);
 
 // 404 handler
