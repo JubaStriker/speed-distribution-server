@@ -8,15 +8,7 @@ import { ServiceError } from './errors';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function toProductJSON(p: any) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const obj = p.toJSON() as any;
-  const cat = obj.category_id as Record<string, unknown> | null;
-  if (cat && typeof cat === 'object' && 'name' in cat) {
-    obj.category_name = cat.name;
-    obj.category_id = cat.id ?? cat._id?.toString();
-  } else {
-    obj.category_name = null;
-  }
-  return obj;
+  return p.toJSON() as any;
 }
 
 export async function getProducts(query: {
@@ -73,13 +65,13 @@ export async function createProduct(data: {
     throw new ServiceError(400, 'Invalid category ID');
   }
 
-  const category = await Category.findById(category_id);
+  const category = await Category.findById(category_id).lean();
   if (!category) throw new ServiceError(404, 'Category not found');
 
   const status = stock_quantity === 0 ? 'out_of_stock' : 'active';
 
   const product = await Product.create({
-    name, category_id, price, stock_quantity, min_stock_threshold, status,
+    name, category_id, category_name: category.name, price, stock_quantity, min_stock_threshold, status,
   });
 
   if (stock_quantity < min_stock_threshold) {
@@ -112,12 +104,14 @@ export async function updateProduct(
   const existing = await Product.findById(id);
   if (!existing) throw new ServiceError(404, 'Product not found');
 
+  let resolvedCategoryName: string | undefined;
   if (updates.category_id) {
     if (!mongoose.Types.ObjectId.isValid(updates.category_id)) {
       throw new ServiceError(400, 'Invalid category ID');
     }
     const category = await Category.findById(updates.category_id);
     if (!category) throw new ServiceError(404, 'Category not found');
+    resolvedCategoryName = category.name;
   }
 
   const newStock = updates.stock_quantity !== undefined ? updates.stock_quantity : existing.stock_quantity;
@@ -135,6 +129,7 @@ export async function updateProduct(
   await Product.findByIdAndUpdate(id, {
     name: updates.name ?? existing.name,
     category_id: updates.category_id ?? existing.category_id,
+    category_name: resolvedCategoryName ?? existing.category_name,
     price: updates.price ?? existing.price,
     stock_quantity: newStock,
     min_stock_threshold: newThreshold,

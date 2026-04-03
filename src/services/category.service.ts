@@ -24,7 +24,7 @@ export async function deleteCategory(id: string) {
   const category = await Category.findById(id);
   if (!category) throw new ServiceError(404, 'Category not found');
 
-  const productCount = await Product.countDocuments({ category_id: new mongoose.Types.ObjectId(id) });
+  const productCount = await Product.countDocuments({ category_id: String });
   if (productCount > 0) {
     throw new ServiceError(409, 'Cannot delete category with associated products');
   }

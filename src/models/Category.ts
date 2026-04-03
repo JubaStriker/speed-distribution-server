@@ -3,7 +3,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface ICategory extends Document {
   name: string;
   created_at: Date;
-  category_id: mongoose.Types.ObjectId | null;
+  category_id: String | null;
 }
 
 const categorySchema = new Schema<ICategory>(
